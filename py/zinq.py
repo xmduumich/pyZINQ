@@ -378,7 +378,7 @@ class ZINQ:
         # marginal p-value in quantile regression
         pval_quantile = 2 * (1 - norm.cdf(np.abs(rs / sigma_hat)))
 
-        return pval_quantile
+        return pval_quantile, sigma_hat
 
 
     @staticmethod
@@ -420,24 +420,24 @@ class ZINQ:
         m = len(yq) 
         width = len(self.quantiles)
         #pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
-        pvals = self._rank_score_test(C_star, yq, qpred0, self.quantiles, m, width)
+        pvals, sigma_hat = self._rank_score_test(C_star, yq, qpred0, self.quantiles, m, width)
 
-        return pvals
+        return pvals, sigma_hat
 
 
     def run_quantile_regression(self, dname):
         # set X_quant
         yq, zr = self._get_quantile(dname)
-        pvals = self._quant_regress(self.C, self.Y[dname], yq, zr)
+        pvals,sigma_hat = self._quant_regress(self.C, self.Y[dname], yq, zr)
 
-        return pvals
+        return pvals, sigma_hat
 
 
     def _marginal_test(self, dname): # ?
         _, _, _, _, firth_pvals = self.run_firth_regression(dname)
-        quant_pvals = self.run_quantile_regression(dname)
+        quant_pvals, quant_sigma_hat = self.run_quantile_regression(dname)
         
-        return firth_pvals, quant_pvals
+        return firth_pvals, quant_pvals, quant_sigma_hat
     
 
     def run_marginal_tests(self) -> tuple[dict[str, dict[str, float]]]:
