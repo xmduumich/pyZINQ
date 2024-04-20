@@ -146,10 +146,17 @@ class ZINQ:
 
         self.Z = metadata[self.covars].to_numpy() # covariates
         self.C = metadata[response].to_numpy() # response variable
-        
+        #self.data_matrix = data_matrix
+
         self.warning_codes = {}
         self.z_pvalues = {} # zero inflation p value
         self.q_pvalues = {} # quantile regression p value
+        self.quant_sigma_hat = {} # quantile regression sigma hat values
+        self.C_star = {}
+        self.rs = {}
+        self.qpred0 = []
+        self.res = []
+        self.data_nonzero = None
         self.Y = {} # dependent variable
         self.weights = {} # weights for each data source
         for i,dname in enumerate(self.dnames):
@@ -359,7 +366,7 @@ class ZINQ:
         y = np.array(y)
         # this is ripped straight from the R code
         #rs = [np.sum((tau - betas[k]) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
-        rs = [np.sum((tau - (y < betas[k])) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
+        rs = [np.sum((tau - (y < betas[k])*1) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
         
         if width == 1:
             cov_rs = quantiles * (1 - quantiles)
@@ -369,16 +376,16 @@ class ZINQ:
                 for l in range(k + 1, width):
                     cov_rs[k, l] = np.min([quantiles[k], quantiles[l]]) - quantiles[k] * quantiles[l]
             cov_rs = cov_rs + cov_rs.T + np.diag(quantiles * (1 - quantiles))
-        sigma_hat = cov_rs * np.sum(c_star ** 2) / m
+        Sigma_hat = cov_rs * np.sum(c_star ** 2) / m # note that Sigma_hat and sigma_hat are different variables (from R)
         if width == 1:
-            sigma_hat = np.sqrt(sigma_hat)
+            sigma_hat = np.sqrt(Sigma_hat)
         else:
-            sigma_hat = np.sqrt(np.diag(sigma_hat))
+            sigma_hat = np.sqrt(np.diag(Sigma_hat))
         
         # marginal p-value in quantile regression
         pval_quantile = 2 * (1 - norm.cdf(np.abs(rs / sigma_hat)))
 
-        return pval_quantile, sigma_hat
+        return pval_quantile, Sigma_hat, rs
 
 
     @staticmethod
@@ -388,7 +395,7 @@ class ZINQ:
         """
         res = model.fit(q=q)
         qpred0 = res.predict()
-
+        
         return qpred0
         
 
@@ -399,14 +406,17 @@ class ZINQ:
         y_not_zero = y != 0
 
         Z_nonzero = self.Z[y_not_zero, :]
+        Z_nonzero_incep = np.hstack((np.repeat(1,Z_nonzero.shape[0]).reshape(-1, 1), Z_nonzero))
+
         C_nonzero = C[y_not_zero]
-        C_star = C_nonzero - Z_nonzero @ np.linalg.pinv(Z_nonzero.T @ Z_nonzero) @ Z_nonzero.T @ C_nonzero
+        C_star = C_nonzero - Z_nonzero_incep @ np.linalg.pinv(Z_nonzero_incep.T @ Z_nonzero_incep) @ Z_nonzero_incep.T @ C_nonzero
 
         # Prepare DataFrame for quantile regression
         #data_nonzero = pd.DataFrame({'C': C_nonzero, 'y': yq})
         data_nonzero = pd.DataFrame(data=Z_nonzero)
         data_nonzero.columns = self.covars
         data_nonzero['y']=yq
+        self.data_nonzero = data_nonzero
 
         # Perform quantile regression for each quantile
         #model = smf.quantreg('y ~ C', data_nonzero)
@@ -417,27 +427,30 @@ class ZINQ:
         quantile_null_formula = "y ~ " + "+".join(self.covars)
         model = smf.quantreg(quantile_null_formula, data_nonzero)
         qpred0 = [self._fit_quant_model(model, tau) for tau in self.quantiles]
+        self.qpred0=qpred0
+        self.res = [model.fit(q=tau)for tau in self.quantiles]
+
         m = len(yq) 
         width = len(self.quantiles)
         #pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
-        pvals, sigma_hat = self._rank_score_test(C_star, yq, qpred0, self.quantiles, m, width)
+        pvals, sigma_hat, rs = self._rank_score_test(C_star, yq, qpred0, self.quantiles, m, width)
 
-        return pvals, sigma_hat
+        return pvals, sigma_hat, C_star,rs
 
 
     def run_quantile_regression(self, dname):
         # set X_quant
         yq, zr = self._get_quantile(dname)
-        pvals,sigma_hat = self._quant_regress(self.C, self.Y[dname], yq, zr)
+        pvals,sigma_hat,C_star,rs = self._quant_regress(self.C, self.Y[dname], yq, zr)
 
-        return pvals, sigma_hat
+        return pvals, sigma_hat, C_star,rs
 
 
     def _marginal_test(self, dname): # ?
         _, _, _, _, firth_pvals = self.run_firth_regression(dname)
-        quant_pvals, quant_sigma_hat = self.run_quantile_regression(dname)
+        quant_pvals, quant_sigma_hat, quant_C_star,quant_rs = self.run_quantile_regression(dname)
         
-        return firth_pvals, quant_pvals, quant_sigma_hat
+        return firth_pvals, quant_pvals, quant_sigma_hat, quant_C_star,quant_rs
     
 
     def run_marginal_tests(self) -> tuple[dict[str, dict[str, float]]]:
@@ -446,7 +459,7 @@ class ZINQ:
         components for each data source
         """
         for dname in self.dnames:
-            self.z_pvalues[dname], self.q_pvalues[dname] = self._marginal_test(dname)
+            self.z_pvalues[dname], self.q_pvalues[dname], self.quant_sigma_hat[dname],self.C_star[dname],self.rs[dname] = self._marginal_test(dname)
 
 
     @staticmethod
